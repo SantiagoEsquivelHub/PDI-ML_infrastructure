@@ -18,13 +18,15 @@ export class InfraMlStack extends cdk.Stack {
       maxAzs: 2,
     });
 
-    // Crear un Security Group que permita el tráfico al puerto 8000 (FastAPI)
+    // Crear un Security Group que permita el tráfico al puerto 8000 (FastAPI) y 443 para HTTPS
     const securityGroup = new ec2.SecurityGroup(this, 'InfraMlSG', {
       vpc,
-      description: 'Permite trafico al puerto 8000 para FastAPI',
+      description: 'Permite trafico al puerto 8000 para FastAPI, 443 para HTTPS y 22 para SSH',
       allowAllOutbound: true,
     });
     securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8000), 'Permitir acceso al puerto 8000');
+    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'Permitir acceso HTTPS');
+    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'Permitir acceso HTTP');
     securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'Permitir acceso SSH');
 
     // Crear rol IAM para la instancia EC2 con permisos para ECR
@@ -67,10 +69,10 @@ export class InfraMlStack extends cdk.Stack {
       associatePublicIpAddress: true,
     });
 
-    // User data mejorado con region fija y mejor manejo de errores
+    // User data mejorado con region fija, NGINX para SSL, y mejor manejo de errores
     instance.addUserData(
       'yum update -y',
-      'yum install -y docker unzip',
+      'yum install -y docker unzip nginx openssl',
       'systemctl start docker',
       'systemctl enable docker',
       'usermod -a -G docker ec2-user',
@@ -99,11 +101,85 @@ export class InfraMlStack extends cdk.Stack {
       // Ejecutar el contenedor en el puerto 8000
       'docker run -d -p 8000:8000 --name ml-api --restart unless-stopped 750477224025.dkr.ecr.$REGION.amazonaws.com/ml-santiago-api:latest',
 
+      // Generar certificado SSL autofirmado para NGINX
+      'mkdir -p /etc/ssl/private',
+      'openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/ssl/private/nginx-selfsigned.key -out /etc/ssl/certs/nginx-selfsigned.crt -subj "/C=US/ST=OH/L=Columbus/O=MLApi/CN=ml-api"',
+      
+      // Configurar NGINX como proxy reverso con SSL
+      'cat > /etc/nginx/nginx.conf << EOF',
+      'user nginx;',
+      'worker_processes auto;',
+      'error_log /var/log/nginx/error.log;',
+      'pid /run/nginx.pid;',
+      '',
+      'events {',
+      '    worker_connections 1024;',
+      '}',
+      '',
+      'http {',
+      '    log_format main \'\\$remote_addr - \\$remote_user [\\$time_local] "\\$request" \'',
+      '                    \'\\$status \\$body_bytes_sent "\\$http_referer" \'',
+      '                    \'"\\$http_user_agent" "\\$http_x_forwarded_for"\';',
+      '',
+      '    access_log /var/log/nginx/access.log main;',
+      '',
+      '    sendfile on;',
+      '    tcp_nopush on;',
+      '    tcp_nodelay on;',
+      '    keepalive_timeout 65;',
+      '    types_hash_max_size 2048;',
+      '',
+      '    include /etc/nginx/mime.types;',
+      '    default_type application/octet-stream;',
+      '',
+      '    # Redirigir HTTP a HTTPS',
+      '    server {',
+      '        listen 80;',
+      '        server_name _;',
+      '        return 301 https://\\$server_name\\$request_uri;',
+      '    }',
+      '',
+      '    # Servidor HTTPS con proxy a FastAPI',
+      '    server {',
+      '        listen 443 ssl;',
+      '        server_name _;',
+      '',
+      '        ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;',
+      '        ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;',
+      '',
+      '        ssl_protocols TLSv1.2 TLSv1.3;',
+      '        ssl_ciphers HIGH:!aNULL:!MD5;',
+      '',
+      '        # Configuracion CORS para frontend',
+      '        add_header Access-Control-Allow-Origin "*" always;',
+      '        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;',
+      '        add_header Access-Control-Allow-Headers "Content-Type, Authorization" always;',
+      '',
+      '        location / {',
+      '            if (\\$request_method = OPTIONS) {',
+      '                return 204;',
+      '            }',
+      '            proxy_pass http://localhost:8000;',
+      '            proxy_set_header Host \\$host;',
+      '            proxy_set_header X-Real-IP \\$remote_addr;',
+      '            proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+      '            proxy_set_header X-Forwarded-Proto \\$scheme;',
+      '        }',
+      '    }',
+      '}',
+      'EOF',
+      
+      // Iniciar NGINX
+      'systemctl start nginx',
+      'systemctl enable nginx',
+
       // Verificar que el contenedor este corriendo y crear logs de status
       'sleep 15',
       'docker ps > /tmp/docker-status.txt',
       'docker logs ml-api > /tmp/ml-api-logs.txt 2>&1',
-      'echo "ML API deployment completed in us-east-2" > /tmp/deployment-status.txt'
+      'nginx -t > /tmp/nginx-test.txt 2>&1',
+      'systemctl status nginx > /tmp/nginx-status.txt 2>&1',
+      'echo "ML API deployment with SSL completed in us-east-2" > /tmp/deployment-status.txt'
     );
 
     // Crear una Elastic IP para mantener la IP fija
@@ -135,7 +211,17 @@ export class InfraMlStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'ApiHealthUrl', {
       value: `http://${elasticIp.ref}:8000/`,
-      description: 'URL para verificar el estado de la API'
+      description: 'URL para verificar el estado de la API (HTTP directo - solo testing)'
+    });
+
+    new cdk.CfnOutput(this, 'ApiHttpsUrl', {
+      value: `https://${elasticIp.ref}/`,
+      description: 'URL HTTPS de la API con SSL (usar esta para frontend de produccion)'
+    });
+
+    new cdk.CfnOutput(this, 'ApiHttpUrl', {
+      value: `http://${elasticIp.ref}/`,
+      description: 'URL HTTP de la API (redirige automaticamente a HTTPS)'
     });
 
     new cdk.CfnOutput(this, 'SSHCommand', {
@@ -164,6 +250,18 @@ export class InfraMlStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ECRDebugCommands', {
       value: 'ssh -i ~/.ssh/infra-ml-keypair.pem ec2-user@' + elasticIp.ref + ' "sudo cat /var/log/cloud-init-output.log | grep -A5 -B5 ecr"',
       description: 'Comando para revisar logs de ECR en la instancia'
+    });
+
+    // Output importante sobre SSL
+    new cdk.CfnOutput(this, 'SSLInfo', {
+      value: 'Certificado SSL autofirmado configurado con NGINX. La API esta disponible via HTTPS. HTTP redirige automaticamente a HTTPS.',
+      description: 'Informacion sobre configuracion SSL/TLS'
+    });
+
+    // Output para debugging de SSL
+    new cdk.CfnOutput(this, 'SSLDebugCommands', {
+      value: 'ssh -i ./infra-ml-keypair.pem ec2-user@' + elasticIp.ref + ' "sudo nginx -t && sudo systemctl status nginx"',
+      description: 'Comandos para verificar configuracion SSL/NGINX'
     });
   }
 }
