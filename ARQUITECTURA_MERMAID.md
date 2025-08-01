@@ -115,17 +115,6 @@ sequenceDiagram
     SG->>EIP: Forward response
     EIP->>U: HTTPS Response
     
-    Note over U,ECR: HTTP Redirect Phase
-    U->>EIP: HTTP Request (port 80)
-    EIP->>SG: Forward request
-    SG->>NGINX: Allow HTTP traffic
-    NGINX->>U: 301 Redirect to HTTPS
-    
-    Note over U,ECR: Monitoring Phase
-    EC2->>EC2: Log to /tmp/docker-status.txt
-    EC2->>EC2: Log to /tmp/nginx-test.txt
-    EC2->>EC2: Log to /tmp/nginx-status.txt
-    EC2->>EC2: Update SSL deployment status
 ```
 
 ---
