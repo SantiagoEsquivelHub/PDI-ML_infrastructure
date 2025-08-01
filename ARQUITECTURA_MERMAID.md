@@ -23,7 +23,7 @@ graph TB
         EIP[📍 Elastic IP Address<br/>Static Public IP<br/>Retained after destroy]:::awsServiceClass
         
         %% Security Layer
-        SG[🛡️ Security Group<br/>InfraMlSG<br/>• SSH: 0.0.0.0/0:22<br/>• FastAPI: 0.0.0.0/0:8000<br/>• Egress: All Traffic]:::securityClass
+        SG[🛡️ Security Group<br/>InfraMlSG<br/>• SSH: 0.0.0.0/0:22<br/>• FastAPI: 0.0.0.0/0:8000<br/>• HTTPS: 0.0.0.0/0:443<br/>• HTTP: 0.0.0.0/0:80<br/>• Egress: All Traffic]:::securityClass
         
         %% VPC Network
         subgraph VPC["🏢 Virtual Private Cloud"]
@@ -48,6 +48,8 @@ graph TB
                     subgraph DOCKER["📦 Docker Runtime Environment"]
                         direction TB
                         CONTAINER["🐳 ML API Container<br/>• Name: ml-api<br/>• Port: 8000:8000<br/>• Restart: unless-stopped<br/>• FastAPI Application"]:::containerClass
+                        
+                        NGINX["🔒 NGINX SSL Proxy<br/>• HTTPS: 443 → 8000<br/>• HTTP: 80 → 443 (redirect)<br/>• SSL Certificate: Self-signed<br/>• TLS 1.2/1.3"]:::securityClass
                     end
                 end
             end
@@ -65,6 +67,8 @@ graph TB
     EC2_SPECS -.-> KEYPAIR
     EC2_SPECS --> DOCKER
     DOCKER --> CONTAINER
+    DOCKER --> NGINX
+    NGINX -.->|Proxy to| CONTAINER
     CONTAINER -.->|Pull Image| ECR
     IAM_ROLE -.->|Authenticate| ECR
 ```
@@ -76,6 +80,7 @@ sequenceDiagram
     participant U as 🌐 User/Client
     participant EIP as 📍 Elastic IP
     participant SG as 🛡️ Security Group
+    participant NGINX as 🔒 NGINX SSL Proxy
     participant EC2 as 💻 EC2 Instance
     participant Docker as 🐳 Docker Runtime
     participant API as 🚀 FastAPI App
@@ -92,25 +97,35 @@ sequenceDiagram
     EC2->>Docker: Start container
     Docker->>API: Initialize FastAPI app
     API->>Docker: Application ready
+    EC2->>NGINX: Configure SSL proxy
+    NGINX->>EC2: SSL proxy ready
     
-    Note over U,ECR: Runtime Phase
-    U->>EIP: HTTP Request (port 8000)
+    Note over U,ECR: Runtime Phase (HTTPS)
+    U->>EIP: HTTPS Request (port 443)
     EIP->>SG: Forward request
     SG->>SG: Validate security rules
-    SG->>EC2: Allow traffic
-    EC2->>Docker: Route to container
+    SG->>NGINX: Allow HTTPS traffic
+    NGINX->>NGINX: SSL termination
+    NGINX->>Docker: Proxy to container :8000
     Docker->>API: Process request
     API->>Docker: Generate response
-    Docker->>EC2: Return response
-    EC2->>SG: Send response
+    Docker->>NGINX: Return response
+    NGINX->>NGINX: Apply SSL encryption
+    NGINX->>SG: Send encrypted response
     SG->>EIP: Forward response
-    EIP->>U: HTTP Response
+    EIP->>U: HTTPS Response
+    
+    Note over U,ECR: HTTP Redirect Phase
+    U->>EIP: HTTP Request (port 80)
+    EIP->>SG: Forward request
+    SG->>NGINX: Allow HTTP traffic
+    NGINX->>U: 301 Redirect to HTTPS
     
     Note over U,ECR: Monitoring Phase
     EC2->>EC2: Log to /tmp/docker-status.txt
-    EC2->>EC2: Log to /tmp/ml-api-logs.txt
-    EC2->>EC2: Update deployment status
+    EC2->>EC2: Log to /tmp/nginx-test.txt
+    EC2->>EC2: Log to /tmp/nginx-status.txt
+    EC2->>EC2: Update SSL deployment status
 ```
 
 ---
-
